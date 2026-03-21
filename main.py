@@ -1,6 +1,6 @@
 from datasetDescriptor import DatasetDescriptor
 from inputDescriptor import InputDescriptor
-from postprocessor import Postprocessor
+from Postprocessor import Postprocessor
 from retrieval import Retrieval
 
 from transformers import CLIPProcessor, CLIPModel
