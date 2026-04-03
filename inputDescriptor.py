@@ -7,6 +7,7 @@ class InputDescriptor:
     def __init__(self, inputPath : str):
         self.inputPath = inputPath
         self.paragraphs = []
+        self.paragraphsDescriptors = []
         self.title = ""
     
     def extractParagraphs(self):
@@ -53,12 +54,13 @@ class InputDescriptor:
             if isinstance(p, str):
                 inputs = processor(text=[p], return_tensors="pt", padding=True).to(device)
                 outputs = model.get_text_features(**inputs)
-                outputs /= outputs.norm(p=2, dim=-1, keepdim=True)
+                outputs /= outputs.norm(p=2, dim=-1, keepdim=True) # on oublie pas de normaliser
                 descriptors.append(outputs.squeeze())
             else:
                 raise Exception("The paragraph must be a text string.")
 
-        return descriptors
+        self.paragraphsDescriptors = descriptors
+        return self.paragraphsDescriptors
 
 #test
 if __name__ == "__main__":

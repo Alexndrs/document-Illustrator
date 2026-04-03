@@ -72,6 +72,8 @@ class DatasetDescriptor:
         if save_path and os.path.exists(save_path):
             print(f"Chargement des projections depuis {save_path}")
             checkpoint = torch.load(save_path, map_location=device)
+            self.imagesPaths = checkpoint['image_paths']
+            self.imagesDescriptors = checkpoint['projections']
             return checkpoint['projections'], checkpoint['image_paths']
 
 
@@ -84,7 +86,7 @@ class DatasetDescriptor:
                 outputs = model.vision_model(pixel_values=inputs['pixel_values'])
                 features = outputs.pooler_output
                 features = model.visual_projection(features)
-                features /= features.norm(p=2, dim=-1, keepdim=True)
+                features /= features.norm(p=2, dim=-1, keepdim=True) # on oublie surtout pas de normaliser pour pouvoir calculer la similarité cosinus efficacement
                 projected_dataset[i*batch_size:(i+1)*batch_size] = features.cpu()
 
 
@@ -95,5 +97,6 @@ class DatasetDescriptor:
                 'image_paths': self.imagesPaths,
             }, save_path)
             print(f"Projections sauvegardées dans {save_path}")
-
-        return projected_dataset, self.imagesPaths
+        
+        self.imagesDescriptors = projected_dataset
+        return self.imagesDescriptors, self.imagesPaths
