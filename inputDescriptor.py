@@ -6,10 +6,15 @@ from PyPDF2 import PdfReader #lecture de pdf
 class InputDescriptor:
     def __init__(self, inputPath : str):
         self.inputPath = inputPath
+        self.paragraphs = []
+        self.title = ""
     
     def extractParagraphs(self):
         #test fichier pdf ou txt
         if self.inputPath.endswith(".pdf"):
+            #extraction du titre
+            title = self.inputPath.split("/")[-1]
+            self.title = title[:-4]
             #extraction des paragraphes du pdf
             reader = PdfReader(self.inputPath)
             paragraphs = []
@@ -37,6 +42,7 @@ class InputDescriptor:
                     paragraphs[i] = [paragraphs[i][j:j+400] for j in range(0, len(paragraphs[i]), 400)]
                     #aplatissement de la liste de paragraphes
                     paragraphs = [item for sublist in paragraphs for item in sublist]
+        self.paragraphs = paragraphs
         return paragraphs
 
     def extractDescriptors(self, paragraphs, processor, model, device):

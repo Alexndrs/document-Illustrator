@@ -4,6 +4,7 @@ Classe qui assemble les images issues de plusieurs dataset et calcule les descri
 
 import os
 import random
+import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 import cv2
@@ -16,13 +17,14 @@ from tqdm import tqdm
 class DatasetDescriptor:
     def __init__(self, datasetPath : str):
         self.datasetPath = datasetPath
+        self.imagesPaths = []
+        self.imagesDescriptors = []
     
     def getImagesPaths(self):
         '''
         Parcourt récursivement le dossier datasetPath et retourne une liste de tous les chemins d'images trouvés.
         '''
         self.dataset_names = os.listdir(self.datasetPath)
-        self.imagesPaths = []
         for dataset_name in self.dataset_names:
             for root, dirs, files in os.walk(os.path.join(self.datasetPath,dataset_name)):
                 for file in files:
@@ -48,16 +50,18 @@ class DatasetDescriptor:
                 plt.title(f"Random image from {ds}")
                 plt.axis('off')
                 plt.show()
-
+    
     def __getitem__(self, index: int):
         '''
         Retourne une paire (image, dataset_name) pour l'image à l'index donné.
         '''
         img_path, dataset_name = self.imagesPaths[index]
-        img = cv2.imread(img_path)
-        img = cv2.resize(img, (256,256))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return img, dataset_name 
+        try:
+            img = Image.open(img_path).convert("RGB").resize((256, 256))
+            img = np.array(img)
+        except Exception:
+            img = np.zeros((256, 256, 3), dtype=np.uint8)  # image noire en cas d'erreur de chargement
+        return img, dataset_name
 
     def projectDatasetWithClip(self, model, processor, batch_size : int, device : str, save_path: str = None):
         '''
