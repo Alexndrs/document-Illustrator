@@ -34,9 +34,6 @@ if __name__ == "__main__":
     inputPath = os.path.join(os.getcwd(), "textes/petite-sirene.pdf")
     inputDescriptor = InputDescriptor(inputPath)
     paragraphs = inputDescriptor.extractParagraphs()
-    for i in range(len(paragraphs)):
-        print(f"Paragraph {i} : {paragraphs[i]}")
-        print('-----------------------------')
     inputDescriptor.extractDescriptors(inputDescriptor.paragraphs, processor, model, device)
 
 

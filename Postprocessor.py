@@ -4,6 +4,7 @@ classe qui prend en entrée un retrieval et un inputDescriptor et qui s'occupe d
 '''
 
 from typing import TYPE_CHECKING
+from pathlib import Path
 if TYPE_CHECKING:
     from retrieval import Retrieval
     from inputDescriptor import InputDescriptor
@@ -24,13 +25,14 @@ class Postprocessor:
         title = self.title + " - Illustrated version"
 
         #création et écriture du fichier markdown
-        with open(title + ".md", "w") as f:
+        with open(title + ".md", "w", encoding="utf-8") as f:
             f.write(f"# {self.title}\n\n")
             for i in range(len(self.paragraphs)):
                 f.write(f"{self.paragraphs[i]}\n")
 
 
                 (image_path, dataset_name, score) = self.retrieval.getMatchingImages(i)[0] # on prend la première image parmi les top_k images les plus similaires
+                image_path = Path(image_path).as_posix()  # convertit automatiquement \ en / pour que ça marche sur markdown
 
                 f.write(f'<p align="center">\n  <img src="{image_path}" alt="Image {i} issue de {dataset_name}" />\n</p>\n')
                 f.write("\n")

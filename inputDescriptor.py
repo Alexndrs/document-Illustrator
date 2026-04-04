@@ -2,6 +2,7 @@
 classe qui prend en entrée un fichier texte raw et qui s'occupe d'extraire les paragraphes et des descripteurs de ces paragraphes. 
 '''
 from PyPDF2 import PdfReader #lecture de pdf
+import torch
 
 class InputDescriptor:
     def __init__(self, inputPath : str):
@@ -46,16 +47,71 @@ class InputDescriptor:
         self.paragraphs = paragraphs
         return paragraphs
 
-    def extractDescriptors(self, paragraphs, processor, model, device):
-        #paragraphs peut soit être une liste de paragraphes, soit une liste de phrases (générés via un llm) correspondant aux paragraphes
-        #cette fonction retourne le vecteur de représentation de chaque paragraphe/phrase dans l'espace latent de CLIP
+    def extractDescriptors(self, paragraphs, processor, model, device, strategy="sliding_window"):
+        '''
+        input :
+        - paragraphs : liste de paragraphes à projeter dans l'espace latent de CLIP
+        - processor : le processor de CLIP
+        - model : le modèle CLIP
+        - device : le device sur lequel faire les calculs (cpu ou gpu)
+        - strategy : la stratégie à adopter pour projeter les paragraphes dans l'espace latent de CLIP. 
+            - "sliding_window" : on divise les paragraphes en morceaux de 77 tokens (taille maximale d'entrée pour CLIP) et on projette chaque morceau séparément on fait ensuite la moyenne. Remarque : on fait overlap de 10 tokens entre les morceaux pour éviter de couper des phrases en deux.
+            - "llm" : on utilise un modèle de langage pour reformuler les paragraphes en des phrases plus courtes qui contiennent l'essentiel de l'information du paragraphe. Cette stratégie est plus coûteuse en temps de calcul mais elle permet d'obtenir de meilleurs résultats car on perd moins d'information.
+            - "truncate" : on tronque les paragraphes pour les faire rentrer dans CLIP : cette stratégie est plus rapide mais aussi très naive car on perd beaucoup d'information dès que les paragraphes sont un peu longs.
+        '''
+
+
         descriptors = []
         for p in paragraphs:
             if isinstance(p, str):
-                inputs = processor(text=[p], return_tensors="pt", padding=True).to(device)
-                outputs = model.get_text_features(**inputs)
-                outputs /= outputs.norm(p=2, dim=-1, keepdim=True) # on oublie pas de normaliser
-                descriptors.append(outputs.squeeze())
+
+                if strategy == "truncate":
+                    inputs = processor(text=[p], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
+                    with torch.no_grad():
+                        outputs = model.text_model(**inputs)
+                        features = outputs.last_hidden_state[:, 0, :]
+                        features = model.text_projection(features)
+                        features /= features.norm(p=2, dim=-1, keepdim=True)
+                        descriptors.append(features.squeeze())
+
+                elif strategy == "sliding_window":
+                    token_ids = processor.tokenizer(p, truncation=False, return_tensors="pt")['input_ids'][0]
+
+                    if len(token_ids) <= 77:  # pas besoin de sliding window
+                        inputs = processor(text=[p], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
+                        with torch.no_grad():
+                            outputs = model.text_model(**inputs)
+                            features = outputs.last_hidden_state[:, 0, :]
+                            features = model.text_projection(features)
+                            features /= features.norm(p=2, dim=-1, keepdim=True)
+                            descriptors.append(features.squeeze())
+
+                    else:
+                        chunk_size = 77
+                        overlap = 10
+                        chunks = [token_ids[i:i+chunk_size] for i in range(0, len(token_ids), chunk_size - overlap)]
+                        
+                        descriptors_chunks = []
+                        for chunk in chunks:
+                            input_ids = chunk.unsqueeze(0).to(device)
+                            with torch.no_grad():
+                                outputs = model.text_model(input_ids=input_ids)
+                                features = outputs.last_hidden_state[:, 0, :]
+                                features = model.text_projection(features)
+                                features /= features.norm(p=2, dim=-1, keepdim=True)
+                                descriptors_chunks.append(features.squeeze())
+
+                        
+                        mean_emb = torch.stack(descriptors_chunks).mean(dim=0)
+                        mean_emb /= mean_emb.norm(p=2, dim=-1, keepdim=True)  # on renormalise après la moyenne
+                        descriptors.append(mean_emb)
+                
+                elif strategy == "llm":
+                    # TODO
+                    raise NotImplementedError("LLM strategy is not implemented yet.")
+                else:
+                    raise ValueError("Unsupported strategy. Only 'sliding_window', 'llm' and 'truncate' are supported.")
+
             else:
                 raise Exception("The paragraph must be a text string.")
 

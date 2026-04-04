@@ -16,12 +16,36 @@ class Retrieval:
         self.top_k = top_k
         self.matching_images = [] # (nb_paragraphes, top_k) où matching_images[i][j] contient le tuple (image_path, dataset_name, score) pour le paragraphe i et l'image j parmi les top_k images les plus similaires
 
+
+    def _prepareImageDescriptors(self):
+        '''
+        Selon que self.datasetDescriptor.imagesDescriptors vient d'être calculé où extrait du checkpoint, il peut être soit une liste de tenseurs 1D soit un tenseur 2D. Cette fonction s'assure que c'est toujours un tenseur 2D.
+        '''
+        descriptors = self.datasetDescriptor.imagesDescriptors
+        if isinstance(descriptors, list):
+            return torch.stack(descriptors)
+        return descriptors
+    
+
+    def _prepareTextDescriptors(self):
+        '''
+        Normalement self.inputDescriptor.paragraphsDescriptors toujours être une liste mais on écrit quand même la fonction pour faire propre
+        '''
+        descriptors = self.inputDescriptor.paragraphsDescriptors
+        if isinstance(descriptors, list):
+            return torch.stack(descriptors)  # [N, 512]
+        return descriptors  # déjà un tenseur
+
+
+
+
     def match(self):
         '''
         Pour chaque paragraphe on trouve les top_k images les plus similaires.
         '''
-        text_embeddings = torch.stack(self.inputDescriptor.paragraphsDescriptors) # (nb_paragraphes, dim_embedding)
-        image_embeddings = torch.stack(self.datasetDescriptor.imagesDescriptors) # (nb_images, dim_embedding)
+        text_embeddings = self._prepareTextDescriptors().float() # (nb_paragraphes, dim_embedding)
+        image_embeddings = self._prepareImageDescriptors().float() # (nb_images, dim_embedding)
+
 
         similarity = text_embeddings @ image_embeddings.T  # (nb_paragraphes, nb_images)
 
