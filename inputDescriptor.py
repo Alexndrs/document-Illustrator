@@ -3,6 +3,7 @@ classe qui prend en entrée un fichier texte raw et qui s'occupe d'extraire les 
 '''
 from PyPDF2 import PdfReader #lecture de pdf
 import torch
+from transformers import pipeline
 
 class InputDescriptor:
     def __init__(self, inputPath : str):
@@ -26,6 +27,7 @@ class InputDescriptor:
         elif self.inputPath.endswith(".txt"):
             #extraction des paragraphes du txt
             with open(self.inputPath, "r") as f:
+                self.title = self.inputPath.split("/")[-1][:-4]
                 text = f.read()
                 paragraphs = text.split("\n\n")
         else:  #si le format n'est pas supporté
@@ -60,6 +62,9 @@ class InputDescriptor:
             - "truncate" : on tronque les paragraphes pour les faire rentrer dans CLIP : cette stratégie est plus rapide mais aussi très naive car on perd beaucoup d'information dès que les paragraphes sont un peu longs.
         '''
 
+        if strategy == "llm":        
+            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0)
+
 
         descriptors = []
         for p in paragraphs:
@@ -68,9 +73,7 @@ class InputDescriptor:
                 if strategy == "truncate":
                     inputs = processor(text=[p], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
                     with torch.no_grad():
-                        outputs = model.text_model(**inputs)
-                        features = outputs.last_hidden_state[:, 0, :]
-                        features = model.text_projection(features)
+                        features = model.get_text_features(**inputs).pooler_output
                         features /= features.norm(p=2, dim=-1, keepdim=True)
                         descriptors.append(features.squeeze())
 
@@ -80,9 +83,7 @@ class InputDescriptor:
                     if len(token_ids) <= 77:  # pas besoin de sliding window
                         inputs = processor(text=[p], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
                         with torch.no_grad():
-                            outputs = model.text_model(**inputs)
-                            features = outputs.last_hidden_state[:, 0, :]
-                            features = model.text_projection(features)
+                            features = model.get_text_features(**inputs).pooler_output
                             features /= features.norm(p=2, dim=-1, keepdim=True)
                             descriptors.append(features.squeeze())
 
@@ -93,11 +94,12 @@ class InputDescriptor:
                         
                         descriptors_chunks = []
                         for chunk in chunks:
-                            input_ids = chunk.unsqueeze(0).to(device)
+                            pad_length = chunk_size - len(chunk)
+                            if pad_length > 0:
+                                chunk = torch.cat([chunk, torch.zeros(pad_length, dtype=torch.long)])
+                            input_ids = chunk.unsqueeze(0).to(device)  # [1, 77]
                             with torch.no_grad():
-                                outputs = model.text_model(input_ids=input_ids)
-                                features = outputs.last_hidden_state[:, 0, :]
-                                features = model.text_projection(features)
+                                features = model.get_text_features(input_ids=input_ids).pooler_output
                                 features /= features.norm(p=2, dim=-1, keepdim=True)
                                 descriptors_chunks.append(features.squeeze())
 
@@ -107,8 +109,20 @@ class InputDescriptor:
                         descriptors.append(mean_emb)
                 
                 elif strategy == "llm":
-                    # TODO
-                    raise NotImplementedError("LLM strategy is not implemented yet.")
+                    prompt = f"Describe the visual scene as a short English image caption (max 15 words):\n\n{p}\n\nCaption:"
+                    result = captioner(prompt, max_new_tokens=30, do_sample=False)
+                    caption = result[0]['generated_text'].split("Caption:")[-1].strip()
+                    inputs = processor(text=[caption], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
+                    print(f"Original paragraph: {p}")
+                    print(f"Generated caption: {caption}")
+                    print("____________________________________")
+                    with torch.no_grad():
+                        features = model.get_text_features(**inputs).pooler_output
+                        features /= features.norm(p=2, dim=-1, keepdim=True)
+                        descriptors.append(features.squeeze())
+
+
+
                 else:
                     raise ValueError("Unsupported strategy. Only 'sliding_window', 'llm' and 'truncate' are supported.")
 

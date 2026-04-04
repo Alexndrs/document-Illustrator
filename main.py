@@ -22,23 +22,25 @@ if __name__ == "__main__":
 
     datasetPath = os.path.join(os.getcwd(), "data")
     print(f"Construction du dataset issue du dossier: {datasetPath}")
-    datasetDescriptor = DatasetDescriptor(datasetPath)
+    datasetDescriptor = DatasetDescriptor(datasetPath, processor=processor)
     datasetDescriptor.getImagesPaths()
-    datasetDescriptor.projectDatasetWithClip(model, processor, batch_size=64, device=device, save_path=os.path.join(os.getcwd(),"projections.pt")) # fait en offline on récupère juste le checkpoint
+    datasetDescriptor.projectDatasetWithClip(model, batch_size=64, device=device, save_path=os.path.join(os.getcwd(),"projections.pt")) # fait en offline on récupère juste le checkpoint
 
 
 
 
     # construction de l'input descriptor
 
-    inputPath = os.path.join(os.getcwd(), "textes/petite-sirene.pdf")
+    # inputPath = os.path.join(os.getcwd(), "textes/petite-sirene.pdf")
+    inputPath = os.path.join(os.getcwd(), "textes/test.txt")
     inputDescriptor = InputDescriptor(inputPath)
     paragraphs = inputDescriptor.extractParagraphs()
+    # inputDescriptor.extractDescriptors(inputDescriptor.paragraphs, processor, model, device, strategy="llm")
     inputDescriptor.extractDescriptors(inputDescriptor.paragraphs, processor, model, device)
 
 
     # retrieval
-    retrieval = Retrieval(inputDescriptor, datasetDescriptor, top_k=5)
+    retrieval = Retrieval(inputDescriptor, datasetDescriptor, top_k=500)
     matching_images = retrieval.match()
 
     # postprocessing

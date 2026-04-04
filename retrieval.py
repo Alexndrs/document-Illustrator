@@ -52,6 +52,7 @@ class Retrieval:
         self.matching_images = []
         for paragraph_index in range(similarity.shape[0]):
             scores = similarity[paragraph_index]  #(nb_images)
+            print(f"min: {scores.min():.3f}, max: {scores.max():.3f}, mean: {scores.mean():.3f}")
             top_k_indices = torch.topk(scores, k=self.top_k).indices  # indices des top_k images
     
             matches = []

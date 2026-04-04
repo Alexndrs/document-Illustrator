@@ -15,10 +15,11 @@ from tqdm import tqdm
 
 
 class DatasetDescriptor:
-    def __init__(self, datasetPath : str):
+    def __init__(self, datasetPath : str, processor=None):
         self.datasetPath = datasetPath
         self.imagesPaths = []
         self.imagesDescriptors = []
+        self.processor = processor
     
     def getImagesPaths(self):
         '''
@@ -57,13 +58,17 @@ class DatasetDescriptor:
         '''
         img_path, dataset_name = self.imagesPaths[index]
         try:
-            img = Image.open(img_path).convert("RGB").resize((256, 256))
-            img = np.array(img)
+            img = Image.open(img_path).convert("RGB")
         except Exception:
-            img = np.zeros((256, 256, 3), dtype=np.uint8)  # image noire en cas d'erreur de chargement
-        return img, dataset_name
+            img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
 
-    def projectDatasetWithClip(self, model, processor, batch_size : int, device : str, save_path: str = None):
+        # on applique le preprocessing CLIP directement ici pour éviter de le faire dans le dataloader qui ne peut pas gérer les images PIL
+        pixel_values = self.processor(images=img, return_tensors="pt").pixel_values.squeeze(0)  # [3, 224, 224]
+        return pixel_values, dataset_name
+
+
+
+    def projectDatasetWithClip(self, model, batch_size : int, device : str, save_path: str = None):
         '''
         projection du dataset dans un espace latent avec CLIP.
         Si save_path est fourni, sauvegarde (ou charge depuis le cache) les projections.
@@ -77,18 +82,14 @@ class DatasetDescriptor:
             return checkpoint['projections'], checkpoint['image_paths']
 
 
-        dataloader = DataLoader(self, batch_size=batch_size, drop_last=False, shuffle=False)
-        projected_dataset = torch.zeros(len(self), 512) #création de la matrice finale, 512 features par image
+        dataloader = DataLoader(self, batch_size=batch_size, drop_last=False, shuffle=False, num_workers=0)
+        projected_dataset = torch.zeros(len(self), 512) # création de la matrice de projection finale
         with torch.no_grad():
             for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Calcul des descripteurs CLIP"):
-                images = batch[0].to(device)
-                inputs = processor(images=images, return_tensors="pt").to(device)
-                outputs = model.vision_model(pixel_values=inputs['pixel_values'])
-                features = outputs.pooler_output
-                features = model.visual_projection(features)
-                features /= features.norm(p=2, dim=-1, keepdim=True) # on oublie surtout pas de normaliser pour pouvoir calculer la similarité cosinus efficacement
+                pixel_values = batch[0].to(device)  # [B, 3, 224, 224] float, sur GPU
+                features = model.get_image_features(pixel_values=pixel_values).pooler_output
+                features /= features.norm(p=2, dim=-1, keepdim=True)
                 projected_dataset[i*batch_size:(i+1)*batch_size] = features.cpu()
-
 
         if save_path:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
