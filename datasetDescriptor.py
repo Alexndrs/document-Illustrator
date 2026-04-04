@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import cv2
 import torch
 from torch.utils.data import DataLoader
+from torch.utils.data import Subset
 from tqdm import tqdm
 
 
@@ -68,36 +69,76 @@ class DatasetDescriptor:
 
 
 
-    def projectDatasetWithClip(self, model, batch_size : int, device : str, save_path: str = None):
+    def projectDatasetWithClip(self, model, batch_size : int, device : str, save_path: str = None, save_every: int = 50):
         '''
         projection du dataset dans un espace latent avec CLIP.
-        Si save_path est fourni, sauvegarde (ou charge depuis le cache) les projections.
+        Si save_path est fourni, sauvegarde (ou charge depuis le cache) les projections et calcule les projections pour les images qui ne sont pas dans le checkpoint
         '''
+
+        # on retient les images déjà projetées pour éviter de les recalculer si elles sont déjà dans le checkpoint
+        existing_data = {}
+
         #chargement du dataset
         if save_path and os.path.exists(save_path):
             print(f"Chargement des projections depuis {save_path}")
             checkpoint = torch.load(save_path, map_location=device)
-            self.imagesPaths = checkpoint['image_paths']
-            self.imagesDescriptors = checkpoint['projections']
-            return checkpoint['projections'], checkpoint['image_paths']
+            paths_only = [p[0] for p in checkpoint['image_paths']]
+            existing_data = dict(zip(paths_only, checkpoint['projections']))
+            print(f"Nombre d'images déjà indexées : {len(existing_data)}")
 
+        missing_indices = [i for i, (path, _) in enumerate(self.imagesPaths) if path not in existing_data]
+        if not missing_indices:
+            print("Toutes les images sont déjà à jour dans le checkpoint.")
+            self.imagesDescriptors = torch.stack([existing_data[p[0]] for p in self.imagesPaths])
+            return self.imagesDescriptors, self.imagesPaths
+        
 
-        dataloader = DataLoader(self, batch_size=batch_size, drop_last=False, shuffle=False, num_workers=0)
-        projected_dataset = torch.zeros(len(self), 512) # création de la matrice de projection finale
+        print(f"Nouvelles images à traiter : {len(missing_indices)}")
+        missing_subset = Subset(self, missing_indices)
+        dataloader = DataLoader(missing_subset, batch_size=batch_size, shuffle=False, num_workers=0)
+
+        model.eval()
+        new_descriptors = {}
         with torch.no_grad():
             for i, batch in tqdm(enumerate(dataloader), total=len(dataloader), desc="Calcul des descripteurs CLIP"):
                 pixel_values = batch[0].to(device)  # [B, 3, 224, 224] float, sur GPU
                 features = model.get_image_features(pixel_values=pixel_values).pooler_output
                 features /= features.norm(p=2, dim=-1, keepdim=True)
-                projected_dataset[i*batch_size:(i+1)*batch_size] = features.cpu()
+                features = features.cpu()
 
+                start_idx = i * batch_size
+                for j in range(features.shape[0]):
+                    global_idx = missing_indices[start_idx + j]
+                    img_path = self.imagesPaths[global_idx][0]
+                    new_descriptors[img_path] = features[j]
+                
+                if save_path and (i + 1) % save_every == 0:
+                    self._save_checkpoint(save_path, existing_data, new_descriptors)
+                    print(f"\n[Checkpoint] Sauvegarde intermédiaire effectuée à l'étape {i+1}")
+
+        existing_data.update(new_descriptors)
         if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            torch.save({
-                'projections': projected_dataset.cpu(),
-                'image_paths': self.imagesPaths,
-            }, save_path)
-            print(f"Projections sauvegardées dans {save_path}")
-        
-        self.imagesDescriptors = projected_dataset
+            self._save_checkpoint(save_path, existing_data, {})
+            print(f"Sauvegarde finale terminée dans {save_path}")
+
+        self.imagesDescriptors = torch.stack([existing_data[p[0]] for p in self.imagesPaths])
         return self.imagesDescriptors, self.imagesPaths
+    
+
+    def _save_checkpoint(self, save_path, existing_dict, new_dict):
+        ''' Fonction utilitaire pour compiler et sauvegarder le dictionnaire en listes '''
+        combined = {**existing_dict, **new_dict}
+        save_paths = []
+        save_projs = []
+        
+        for path_tuple in self.imagesPaths:
+            path = path_tuple[0]
+            if path in combined:
+                save_paths.append(path_tuple)
+                save_projs.append(combined[path])
+        
+        if save_projs:
+            torch.save({
+                'projections': torch.stack(save_projs).cpu(),
+                'image_paths': save_paths,
+            }, save_path)

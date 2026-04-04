@@ -25,16 +25,7 @@ class Retrieval:
         if isinstance(descriptors, list):
             return torch.stack(descriptors)
         return descriptors
-    
 
-    def _prepareTextDescriptors(self):
-        '''
-        Normalement self.inputDescriptor.paragraphsDescriptors toujours être une liste mais on écrit quand même la fonction pour faire propre
-        '''
-        descriptors = self.inputDescriptor.paragraphsDescriptors
-        if isinstance(descriptors, list):
-            return torch.stack(descriptors)  # [N, 512]
-        return descriptors  # déjà un tenseur
 
 
 
@@ -43,23 +34,30 @@ class Retrieval:
         '''
         Pour chaque paragraphe on trouve les top_k images les plus similaires.
         '''
-        text_embeddings = self._prepareTextDescriptors().float() # (nb_paragraphes, dim_embedding)
         image_embeddings = self._prepareImageDescriptors().float() # (nb_images, dim_embedding)
-
-
-        similarity = text_embeddings @ image_embeddings.T  # (nb_paragraphes, nb_images)
+        text_descriptors_list = self.inputDescriptor.paragraphsDescriptors
 
         self.matching_images = []
-        for paragraph_index in range(similarity.shape[0]):
-            scores = similarity[paragraph_index]  #(nb_images)
-            print(f"min: {scores.min():.3f}, max: {scores.max():.3f}, mean: {scores.mean():.3f}")
-            top_k_indices = torch.topk(scores, k=self.top_k).indices  # indices des top_k images
-    
+        for i in range(len(text_descriptors_list)):
+            paragraph_emb = text_descriptors_list[i].float() # (1, 512) ou (nb_chunks, 512) selon la stratégie d'extraction des descripteurs de texte choisie
+            
+            # Calcul de la similarité cosinus entre tous les chunks du paragraphe et toutes les images
+            # (nb_chunks, 512) @ (512, nb_images) -> (nb_chunks, nb_images)
+            similarities = paragraph_emb @ image_embeddings.T
+            
+            # On prend le meilleur chunk pour chaque image : si nb_chunks > 1, on réduit la dimension 0 en gardant le maximum
+            # scores shape: [nb_images]
+            scores, _ = similarities.max(dim=0)
+            
+            print(f"Paragraph {i} - min: {scores.min():.3f}, max: {scores.max():.3f}, mean: {scores.mean():.3f}")
+            
+            # Récupération des top_k
+            top_k_values, top_k_indices = torch.topk(scores, k=min(self.top_k, len(scores)))
+            
             matches = []
-            for img_index in top_k_indices:
-                img_path, dataset_name = self.datasetDescriptor.imagesPaths[img_index]
-                score = scores[img_index].item()
-                matches.append((img_path, dataset_name, score))
+            for idx, score in zip(top_k_indices, top_k_values):
+                img_path, dataset_name = self.datasetDescriptor.imagesPaths[idx.item()]
+                matches.append((img_path, dataset_name, score.item()))
             
             self.matching_images.append(matches)
 

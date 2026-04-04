@@ -49,7 +49,7 @@ class InputDescriptor:
         self.paragraphs = paragraphs
         return paragraphs
 
-    def extractDescriptors(self, paragraphs, processor, model, device, strategy="sliding_window"):
+    def extractDescriptors(self, paragraphs, processor, model, device, strategy="best_matching_chunk"):
         '''
         input :
         - paragraphs : liste de paragraphes à projeter dans l'espace latent de CLIP
@@ -60,77 +60,72 @@ class InputDescriptor:
             - "sliding_window" : on divise les paragraphes en morceaux de 77 tokens (taille maximale d'entrée pour CLIP) et on projette chaque morceau séparément on fait ensuite la moyenne. Remarque : on fait overlap de 10 tokens entre les morceaux pour éviter de couper des phrases en deux.
             - "llm" : on utilise un modèle de langage pour reformuler les paragraphes en des phrases plus courtes qui contiennent l'essentiel de l'information du paragraphe. Cette stratégie est plus coûteuse en temps de calcul mais elle permet d'obtenir de meilleurs résultats car on perd moins d'information.
             - "truncate" : on tronque les paragraphes pour les faire rentrer dans CLIP : cette stratégie est plus rapide mais aussi très naive car on perd beaucoup d'information dès que les paragraphes sont un peu longs.
+            - "best_matching_chunk" : 
+            - "keywords"
         '''
 
         if strategy == "llm":        
+            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0)
+        
+        if strategy == "keywords":
             captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0)
 
 
         descriptors = []
         for p in paragraphs:
-            if isinstance(p, str):
+            if not isinstance(p, str):
+                continue
 
+            if strategy in ["truncate", "llm", "keywords"]:
+                # avec ces stratégies, on obtient un seul vecteur par paragraphe, donc on peut faire la projection directement
                 if strategy == "truncate":
-                    inputs = processor(text=[p], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
-                    with torch.no_grad():
-                        features = model.get_text_features(**inputs).pooler_output
-                        features /= features.norm(p=2, dim=-1, keepdim=True)
-                        descriptors.append(features.squeeze())
-
-                elif strategy == "sliding_window":
-                    token_ids = processor.tokenizer(p, truncation=False, return_tensors="pt")['input_ids'][0]
-
-                    if len(token_ids) <= 77:  # pas besoin de sliding window
-                        inputs = processor(text=[p], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
-                        with torch.no_grad():
-                            features = model.get_text_features(**inputs).pooler_output
-                            features /= features.norm(p=2, dim=-1, keepdim=True)
-                            descriptors.append(features.squeeze())
-
-                    else:
-                        chunk_size = 77
-                        overlap = 10
-                        chunks = [token_ids[i:i+chunk_size] for i in range(0, len(token_ids), chunk_size - overlap)]
-                        
-                        descriptors_chunks = []
-                        for chunk in chunks:
-                            pad_length = chunk_size - len(chunk)
-                            if pad_length > 0:
-                                chunk = torch.cat([chunk, torch.zeros(pad_length, dtype=torch.long)])
-                            input_ids = chunk.unsqueeze(0).to(device)  # [1, 77]
-                            with torch.no_grad():
-                                features = model.get_text_features(input_ids=input_ids).pooler_output
-                                features /= features.norm(p=2, dim=-1, keepdim=True)
-                                descriptors_chunks.append(features.squeeze())
-
-                        
-                        mean_emb = torch.stack(descriptors_chunks).mean(dim=0)
-                        mean_emb /= mean_emb.norm(p=2, dim=-1, keepdim=True)  # on renormalise après la moyenne
-                        descriptors.append(mean_emb)
-                
+                    text_input = p
                 elif strategy == "llm":
-                    prompt = f"Describe the visual scene as a short English image caption (max 15 words):\n\n{p}\n\nCaption:"
-                    result = captioner(prompt, max_new_tokens=30, do_sample=False)
-                    caption = result[0]['generated_text'].split("Caption:")[-1].strip()
-                    inputs = processor(text=[caption], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
-                    print(f"Original paragraph: {p}")
-                    print(f"Generated caption: {caption}")
-                    print("____________________________________")
+                    prompt = f"<|im_start|>system\nSummarize this into one descriptive English sentence.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
+                    caption = captioner(prompt, max_new_tokens=25, do_sample=False)
+                    text_input = caption[0]['generated_text'].split("assistant\n")[-1].strip()
+                elif strategy == "keywords":
+                    prompt = f"<|im_start|>system\nList 5 English visual keywords for this scene, separated by commas.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
+                    keywords = captioner(prompt, max_new_tokens=20, do_sample=False)
+                    text_input = keywords[0]['generated_text'].split("assistant\n")[-1].strip()
+
+                inputs = processor(text=[text_input], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
+                with torch.no_grad():
+                    features = model.get_text_features(**inputs).pooler_output
+                    features /= features.norm(p=2, dim=-1, keepdim=True)
+                    descriptors.append(features) # (1, 512) (car on a un seul vecteur par paragraphe avec ces stratégies)
+
+            elif strategy in ["sliding_window", "best_matching_chunk"]:
+                # avec ces stratégies, on obtient plusieurs vecteurs par paragraphe, donc on doit d'abord faire la projection puis éventuellement faire une agrégation (moyenne ou max) pour rester compatible avec le reste du code qui suppose qu'on a un seul vecteur par paragraphe.
+                token_ids = processor.tokenizer(p, truncation=False, return_tensors="pt")['input_ids'][0]
+                chunk_size = 77
+                overlap = 10
+                chunks = [token_ids[i:i+chunk_size] for i in range(0, len(token_ids), chunk_size - overlap)]
+                
+                chunk_features = []
+                for chunk in chunks:
+                    if len(chunk) < chunk_size:
+                        chunk = torch.cat([chunk, torch.zeros(chunk_size - len(chunk), dtype=torch.long)])
+                    input_ids = chunk.unsqueeze(0).to(device)
                     with torch.no_grad():
-                        features = model.get_text_features(**inputs).pooler_output
+                        features = model.get_text_features(input_ids=input_ids).pooler_output
                         features /= features.norm(p=2, dim=-1, keepdim=True)
-                        descriptors.append(features.squeeze())
+                        chunk_features.append(features) # (1, 512)
+                
+                combined_chunks = torch.cat(chunk_features, dim=0) # (nb_chunks, 512)
 
-
-
+                if strategy == "sliding_window":
+                    # On fait la moyenne
+                    mean_feat = combined_chunks.mean(dim=0, keepdim=True)
+                    mean_feat /= mean_feat.norm(p=2, dim=-1, keepdim=True)
+                    descriptors.append(mean_feat) # (1, 512)
                 else:
-                    raise ValueError("Unsupported strategy. Only 'sliding_window', 'llm' and 'truncate' are supported.")
-
-            else:
-                raise Exception("The paragraph must be a text string.")
+                    # strategy == "best_matching_chunk"
+                    # On garde la matrice de tous les chunks et dans retrieval on prendra le chunk avec la meilleure similarité cosinus avec une image du dataset
+                    descriptors.append(combined_chunks)
 
         self.paragraphsDescriptors = descriptors
-        return self.paragraphsDescriptors
+        return descriptors
 
 #test
 if __name__ == "__main__":

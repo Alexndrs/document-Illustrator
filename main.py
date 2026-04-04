@@ -31,12 +31,12 @@ if __name__ == "__main__":
 
     # construction de l'input descriptor
 
-    # inputPath = os.path.join(os.getcwd(), "textes/petite-sirene.pdf")
-    inputPath = os.path.join(os.getcwd(), "textes/test.txt")
+    inputPath = os.path.join(os.getcwd(), "textes/petite-sirene.pdf")
+    # inputPath = os.path.join(os.getcwd(), "textes/test.txt")
     inputDescriptor = InputDescriptor(inputPath)
     paragraphs = inputDescriptor.extractParagraphs()
     # inputDescriptor.extractDescriptors(inputDescriptor.paragraphs, processor, model, device, strategy="llm")
-    inputDescriptor.extractDescriptors(inputDescriptor.paragraphs, processor, model, device)
+    inputDescriptor.extractDescriptors(inputDescriptor.paragraphs, processor, model, device, strategy="best_matching_chunk")
 
 
     # retrieval
