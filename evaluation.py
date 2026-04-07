@@ -1,64 +1,67 @@
-from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+import re
+import time
+import os
 from PIL import Image
-import torch
-from transformers import BitsAndBytesConfig
+from dotenv import load_dotenv
+from google import genai
+from logger import save_logs
 
 
-model_name = "Qwen/Qwen2-VL-2B-Instruct"
+load_dotenv("key.env")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+class Evaluation:
+    def __init__(self, api_key=GEMINI_API_KEY):
+        save_logs("Initializing Gemini Evaluation Model...\n")
+        self.client = genai.Client(api_key=api_key)
+        self.model_id = "gemini-3.1-flash-lite-preview"
 
-prompt = """Ton rôle est d'évaluer la pertinence d'une illustration par rapport à un paragraphe donné.
-Entrée : [IMAGE] + {paragraphe}
-Instructions : 1. Analyse les éléments visuels clés de l'image (sujet, personnage, environnement...).
-2. Compare-les avec les informations du paragraphe.
-3. Donne une note de 1 à 5, où 1 signifie "pas du tout pertinent" et 5 signifie "très pertinent". 
+    def evaluate_batch(self, paragraphs, images):
+        notes = []
+        for i in range(len(images)):
+            image_path = images[i]
+            paragraph = paragraphs[i]
+            print(f"Evaluating paragraph: {paragraph}\nWith image: {image_path}\n")
+            try:
+                
+                img = Image.open(image_path)
+                
+                prompt = f"""Compare this image with the following paragraph:
+Paragraph: {paragraph}
 
-Format de réponse : "note"
+Instructions:
+1. Rate the relevance from 1 to 5 : 1 means not relevant, 5 means perfectly relevant.
+2. Output ONLY the number. No text, no explanation.
 
-Tu ne dois retourner que la note, sans explication ni commentaire supplémentaire.
-"""
+Relevance score (1-5):"""
+                print(f"Prompt for evaluation: {prompt}\n")
+                response = self.client.models.generate_content(
+                    model=self.model_id,
+                    contents=[prompt, img]
+                )
+                print(response.text)
+                
+                output_text = response.text.strip()
+                print(f"Model output: {output_text}")
+                match = re.search(r'[1-5]', output_text)
+                if match:
+                    note = int(match.group())
+                    notes.append(note)
+                else:
+                    save_logs(f"No number found in output: {output_text}\n")
+                    notes.append(None)
 
+                # on attend 4 sec pour éviter de faire trop de requêtes trop rapidement à l'API
+                time.sleep(4)
 
-def evaluate_batch(model_name, paragraphs, images, quantization = True) :
-    print("loading model")
-    if quantization :
-        quantization_config = BitsAndBytesConfig(load_in_4bit=True)
-        model = Qwen2VLForConditionalGeneration.from_pretrained(model_name, quantization_config=quantization_config, device_map="auto")
-    else :
-        model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_name, torch_dtype="auto", device_map="auto")
-    
-    processor = AutoProcessor.from_pretrained(model_name)
-    
-    print("processing inferences")
-    notes = []
-    for (paragraph, image_path) in zip(paragraphs, images) :
-        image = Image.open(image_path)  #vérifier le chemin d'accès
-        messages = [{"role": "user","content": [
-            {"type": "image", "image": image},
-            {"type": "text", "text": prompt},],}]
-        
-        #inférence
-        text_prompt = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        inputs = processor(text=[text_prompt], images=[image], padding=True, return_tensors="pt").to("cuda")
-        generated_ids = model.generate(**inputs, max_new_tokens=128)
-        output_text = processor.batch_decode(generated_ids, skip_special_tokens=True)
-        note = float(output_text)
-        notes.append(note)
-    return notes
-#calculer ensuite moyenne, variance etc, faire varier les datasets,techniques, documents
+            except Exception as e:
+                print(f"Error on {image_path}: {e}\n")
+                save_logs(f"Error on {image_path}: {e}\n")
+                notes.append(None)
+        return notes
 
 
-#tests
+if __name__ == "__main__":
 
-paragraphs = ["""Bien loin dans la mer, il est un endroit où l’eau est, pure comme le verre le plus 
-transparent, mais si profonde qu’il serait inutile d’y jeter l’ancre. Il faudrait y entasser 
-une quantité infinie de tours d’église les unes sur les autres pour mesurer la distance 
-séparant la surface du fond. 
-C’est là que demeure le peuple de la mer. Sur un fond de sable blanc des plantes et 
-des arbres bizarres y croissent, si souple que le moindre mouvement de l’eau les fait 
-onduler et bouger comme s’ils étaient vivants.
-Tous les poissons, grands et petits, nagent entre les branches comme les oiseaux dans 
-l’air."""]
-images = ['data/paysages/1091675.jpg']
-
-#evaluate_batch(model_name, paragraphs, images)
+    evaluator = Evaluation()
+    notes = evaluator.evaluate_batch(["A landscape with mountains"], ["C:/Users/alex/Desktop/academique/cours polymtl/inf8801A/projet/data/laion-art-dl/image_4839.jpg"])
+    print(notes)

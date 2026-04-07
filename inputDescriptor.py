@@ -4,21 +4,19 @@ classe qui prend en entrée un fichier texte raw et qui s'occupe d'extraire les 
 from PyPDF2 import PdfReader #lecture de pdf
 import torch
 from transformers import pipeline
+from logger import save_logs
 
 class InputDescriptor:
-    def __init__(self, inputPath : str):
+    def __init__(self, inputPath : str,):
         self.inputPath = inputPath
         self.paragraphs = []
         self.paragraphsDescriptors = []
         self.title = ""
-    
+        
     def extractParagraphs(self):
-        #test fichier pdf ou txt
         if self.inputPath.endswith(".pdf"):
-            #extraction du titre
             title = self.inputPath.split("/")[-1]
             self.title = title[:-4]
-            #extraction des paragraphes du pdf
             reader = PdfReader(self.inputPath)
             paragraphs = []
             for page in reader.pages:
@@ -28,8 +26,12 @@ class InputDescriptor:
             #extraction des paragraphes du txt
             with open(self.inputPath, "r") as f:
                 self.title = self.inputPath.split("/")[-1][:-4]
-                text = f.read()
-                paragraphs = text.split("\n\n")
+                try:
+                    text = f.read()
+                    paragraphs = text.split("\n\n")
+                except Exception as e:
+                    save_logs(f"Error while reading the input file: {e}")
+                    return []
         else:  #si le format n'est pas supporté
             raise ValueError("Unsupported file format. Only .pdf and .txt are supported.")
 
@@ -65,10 +67,10 @@ class InputDescriptor:
         '''
 
         if strategy == "llm":        
-            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0)
+            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0, torch_dtype=torch.float16)
         
         if strategy == "keywords":
-            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0)
+            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0, torch_dtype=torch.float16)
 
 
         descriptors = []
@@ -81,13 +83,16 @@ class InputDescriptor:
                 if strategy == "truncate":
                     text_input = p
                 elif strategy == "llm":
-                    prompt = f"<|im_start|>system\nSummarize this into one descriptive English sentence.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
-                    caption = captioner(prompt, max_new_tokens=25, do_sample=False)
-                    text_input = caption[0]['generated_text'].split("assistant\n")[-1].strip()
+                    prompt = f"<|im_start|>system\nYou are an image captioning assistant. Given a text, output ONLY a short English visual scene description in 10 words maximum. Focus on what is visually present: characters, setting, objects. No story, no narrative.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\nVisual scene:"
+                    caption = captioner(prompt, max_new_tokens=20,max_length=None, do_sample=False)
+                    text_input = caption[0]['generated_text'].split("Visual scene:")[-1].strip()
+                    text_input = text_input.split("\n")[0].strip()
+                    save_logs(f"Original paragraph: {p}\nLLM description: {text_input}\n")
                 elif strategy == "keywords":
                     prompt = f"<|im_start|>system\nList 5 English visual keywords for this scene, separated by commas.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
-                    keywords = captioner(prompt, max_new_tokens=20, do_sample=False)
+                    keywords = captioner(prompt, max_new_tokens=20,max_length=None, do_sample=False)
                     text_input = keywords[0]['generated_text'].split("assistant\n")[-1].strip()
+                    save_logs(f"Original paragraph: {p}\nExtracted keywords: {text_input}\n")
 
                 inputs = processor(text=[text_input], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
                 with torch.no_grad():
@@ -126,11 +131,3 @@ class InputDescriptor:
 
         self.paragraphsDescriptors = descriptors
         return descriptors
-
-#test
-if __name__ == "__main__":
-    inputDescriptor = InputDescriptor("textes/petite-sirene.pdf")
-    paragraphs = inputDescriptor.extractParagraphs()
-    for i in range(len(paragraphs)):
-        print(f"Paragraph {i} : {paragraphs[i]}")
-        print('-----------------------------')

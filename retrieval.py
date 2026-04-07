@@ -4,6 +4,7 @@ classe qui prend en entrée un inputDescriptor et un datasetDescriptor et qui s'
 '''
 
 import torch
+from pathlib import Path
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from inputDescriptor import InputDescriptor
@@ -26,20 +27,20 @@ class Retrieval:
             return torch.stack(descriptors)
         return descriptors
 
-
-
-
-
-    def match(self):
+    def match(self, device=None):
         '''
         Pour chaque paragraphe on trouve les top_k images les plus similaires.
         '''
-        image_embeddings = self._prepareImageDescriptors().float() # (nb_images, dim_embedding)
+        if device is None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+        image_embeddings = self._prepareImageDescriptors().float().to(device) # (nb_images, dim_embedding)
         text_descriptors_list = self.inputDescriptor.paragraphsDescriptors
 
         self.matching_images = []
         for i in range(len(text_descriptors_list)):
-            paragraph_emb = text_descriptors_list[i].float() # (1, 512) ou (nb_chunks, 512) selon la stratégie d'extraction des descripteurs de texte choisie
+            paragraph_emb = text_descriptors_list[i].float().to(device) # (1, 512) ou (nb_chunks, 512) selon la stratégie d'extraction des descripteurs de texte choisie
             
             # Calcul de la similarité cosinus entre tous les chunks du paragraphe et toutes les images
             # (nb_chunks, 512) @ (512, nb_images) -> (nb_chunks, nb_images)
@@ -56,11 +57,21 @@ class Retrieval:
             
             matches = []
             for idx, score in zip(top_k_indices, top_k_values):
-                img_path, dataset_name = self.datasetDescriptor.imagesPaths[idx.item()]
-                matches.append((img_path, dataset_name, score.item()))
-            
-            self.matching_images.append(matches)
+                source, dataset_name = self.datasetDescriptor.imagesPaths[idx.item()]
+                if isinstance(source, str):
+                    # Image locale : on s'assure juste d'avoir le chemin absolu
+                    final_path = Path(source).resolve().as_posix()
+                else:
+                    # Image HF : on demande au descriptor de la sauvegarder de dowload et de nous retourner le chemin local
+                    final_path = self.datasetDescriptor._save_hf_image(source, dataset_name)
+                matches.append({
+                    'path': final_path,
+                    'dataset': dataset_name,
+                    'score': score.item(),
+                    'original_source': source
+                })
 
+            self.matching_images.append(matches)
         return self.matching_images
     
     def getMatchingImages(self, paragraph_index):
