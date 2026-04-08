@@ -16,12 +16,12 @@ HF_DATASET_NAMES = ["fantasyfish/laion-art"]
 
 
 class DocumentIllustrator:
-    def __init__(self):
+    def __init__(self, local_dataset_path=LOCAL_DATASET_PATH, hf_dataset_names=HF_DATASET_NAMES):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
         self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
 
-        self.datasetDescriptor = DatasetDescriptor(LOCAL_DATASET_PATH, hf_dataset_names=HF_DATASET_NAMES, processor=self.processor)
+        self.datasetDescriptor = DatasetDescriptor(local_dataset_path, hf_dataset_names, processor=self.processor)
         self.datasetDescriptor.getImagesPaths()
         self.datasetDescriptor.projectDatasetWithClip(self.model, batch_size=64, device=self.device, save_path=os.path.join(os.getcwd(),"projections.pt")) # fait en offline on récupère juste le checkpoint
 
@@ -43,9 +43,6 @@ class DocumentIllustrator:
         retrieval = Retrieval(inputDescriptor, self.datasetDescriptor, top_k=5)
 
         matching_images = retrieval.match(device=self.device)
-        for i in range(len(paragraphs)):
-            save_logs(f"Paragraph {i+1}:\nOriginal: {paragraphs[i]}\nTranslated: {english_paragraphs[i]}\nMatching images: {matching_images[i]}\n\n")
-
 
         postprocessor = Postprocessor(retrieval, inputDescriptor, output_path=outputPath)
         postprocessor.rebuild()
@@ -55,8 +52,10 @@ class DocumentIllustrator:
 
 if __name__ == "__main__":
     # Exemple d'utilisation
+
     illustrator = DocumentIllustrator()
-    paragraphs, matching_images = illustrator.process("test.txt", strategy="llm")
+    paragraphs, matching_images = illustrator.process("petite-sirene.pdf", strategy="llm")
+    # paragraphs, matching_images = illustrator.process("test.txt", strategy="truncate")
     for i in range(len(paragraphs)):
         paragraph, img_path = paragraphs[i], matching_images[i][0]['path']
         print(f"Paragraph: {paragraph}\nMatching image: {img_path}\n")

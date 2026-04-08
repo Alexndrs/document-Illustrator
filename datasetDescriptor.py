@@ -94,9 +94,7 @@ class DatasetDescriptor:
         except Exception:
             img = Image.fromarray(np.zeros((224, 224, 3), dtype=np.uint8))
 
-        # on applique le preprocessing CLIP directement ici pour éviter de le faire dans le dataloader qui ne peut pas gérer les images PIL
-        pixel_values = self.processor(images=img, return_tensors="pt").pixel_values.squeeze(0)  # [3, 224, 224]
-        return pixel_values, dataset_name
+        return img, dataset_name
 
     def _save_hf_image(self, hf_source, dataset_name):
         '''
@@ -170,17 +168,26 @@ class DatasetDescriptor:
             return self.imagesDescriptors, self.imagesPaths
 
         print(f"Images à traiter : {len(missing_indices)}")
-        dataloader = DataLoader(Subset(self, missing_indices), batch_size=batch_size,
-                                shuffle=False, num_workers=0)
+
+        def collate_fn(batch):
+            # cette fonction dit au DataLoader de ne pas essayer de transformer les images PIL en tenseurs tout de suite
+            return [item[0] for item in batch], [item[1] for item in batch]
+        
+        dataloader = DataLoader(Subset(self, missing_indices), batch_size=batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn)
 
         model.eval()
         new_descriptors = {}
         with torch.no_grad():
-            for i, batch in tqdm(enumerate(dataloader), total=len(dataloader),
-                                 desc="Descripteurs CLIP"):
-                features = model.get_image_features(pixel_values=batch[0].to(device)).pooler_output
-                features /= features.norm(p=2, dim=-1, keepdim=True)
+            for i, (images, names) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Descripteurs CLIP"):
+                
+                inputs = self.processor(images=images, return_tensors="pt").to(device)
+                outputs = model.vision_model(**inputs)
+                pooled = outputs.pooler_output
+                features = model.visual_projection(pooled)
+
+                features = features / features.norm(p=2, dim=-1, keepdim=True)
                 features = features.cpu()
+
 
                 for j in range(features.shape[0]):
                     global_idx = missing_indices[i * batch_size + j]

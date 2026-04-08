@@ -46,6 +46,7 @@ class Retrieval:
             # (nb_chunks, 512) @ (512, nb_images) -> (nb_chunks, nb_images)
             similarities = paragraph_emb @ image_embeddings.T
             
+
             # On prend le meilleur chunk pour chaque image : si nb_chunks > 1, on réduit la dimension 0 en gardant le maximum
             # scores shape: [nb_images]
             scores, _ = similarities.max(dim=0)

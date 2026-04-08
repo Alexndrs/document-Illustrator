@@ -5,3 +5,4 @@ results
 textes
 *.log
 *.env
+projections_save.pt

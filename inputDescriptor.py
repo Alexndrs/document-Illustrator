@@ -3,11 +3,20 @@ classe qui prend en entrée un fichier texte raw et qui s'occupe d'extraire les 
 '''
 from PyPDF2 import PdfReader #lecture de pdf
 import torch
-from transformers import pipeline
+import os
+import time
+import json
+from google import genai
+from dotenv import load_dotenv
 from logger import save_logs
 
+
+load_dotenv("key.env")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+
 class InputDescriptor:
-    def __init__(self, inputPath : str,):
+    def __init__(self, inputPath : str):
         self.inputPath = inputPath
         self.paragraphs = []
         self.paragraphsDescriptors = []
@@ -51,7 +60,7 @@ class InputDescriptor:
         self.paragraphs = paragraphs
         return paragraphs
 
-    def extractDescriptors(self, paragraphs, processor, model, device, strategy="best_matching_chunk"):
+    def extractDescriptors(self, paragraphs, processor, model, device, strategy="best_matching_chunk", api_key=GEMINI_API_KEY):
         '''
         input :
         - paragraphs : liste de paragraphes à projeter dans l'espace latent de CLIP
@@ -66,45 +75,108 @@ class InputDescriptor:
             - "keywords"
         '''
 
-        if strategy == "llm":        
-            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0, torch_dtype=torch.float16)
+        if strategy == "llm" or strategy == "keywords":        
+            client = genai.Client(api_key=api_key)
+            model_id = "gemini-3.1-flash-lite-preview"
         
-        if strategy == "keywords":
-            captioner = pipeline("text-generation", model="Qwen/Qwen2.5-1.5B-Instruct", device=0, torch_dtype=torch.float16)
-
 
         descriptors = []
-        for p in paragraphs:
-            if not isinstance(p, str):
-                continue
+        processed_texts = []
 
-            if strategy in ["truncate", "llm", "keywords"]:
-                # avec ces stratégies, on obtient un seul vecteur par paragraphe, donc on peut faire la projection directement
-                if strategy == "truncate":
-                    text_input = p
-                elif strategy == "llm":
-                    prompt = f"<|im_start|>system\nYou are an image captioning assistant. Given a text, output ONLY a short English visual scene description in 10 words maximum. Focus on what is visually present: characters, setting, objects. No story, no narrative.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\nVisual scene:"
-                    caption = captioner(prompt, max_new_tokens=20,max_length=None, do_sample=False)
-                    text_input = caption[0]['generated_text'].split("Visual scene:")[-1].strip()
-                    text_input = text_input.split("\n")[0].strip()
-                    save_logs(f"Original paragraph: {p}\nLLM description: {text_input}\n")
-                elif strategy == "keywords":
-                    prompt = f"<|im_start|>system\nList 5 English visual keywords for this scene, separated by commas.<|im_end|>\n<|im_start|>user\n{p}<|im_end|>\n<|im_start|>assistant\n"
-                    keywords = captioner(prompt, max_new_tokens=20,max_length=None, do_sample=False)
-                    text_input = keywords[0]['generated_text'].split("assistant\n")[-1].strip()
-                    save_logs(f"Original paragraph: {p}\nExtracted keywords: {text_input}\n")
 
+        if strategy in ["llm", "keywords"]:
+            # on regroupe les paragraphes pour traiter par batch et limiter les appels à l'API
+            batch_size = 8
+
+            for i in range(0, len(paragraphs), batch_size):
+                batch = paragraphs[i : i + batch_size]
+                
+                if strategy == "llm":
+                    prompt_content = f'''Return a JSON object with a key "results" containing a list of {len(batch)} strings.
+Each string must be a CLIP-optimized caption (5-12 words, visible elements only, no abstraction) for the corresponding text.
+
+Texts to process:
+{json.dumps(batch, indent=2)}
+
+Format: {{"results": ["caption 1", "caption 2", ...]}}'''
+            
+                else: # keywords
+                    prompt_content = f'''Return a JSON object with a key "results" containing a list of {len(batch)} strings.
+    Each string must be exactly 5 visual keywords separated by commas for the corresponding text.
+
+    Texts to process:
+    {json.dumps(batch, indent=2)}
+
+    Format: {{"results": ["key1, key2, ...", "key1, key2, ...", ...]}}'''
+                        
+
+                try:
+                    response = client.models.generate_content(
+                        model=model_id,
+                        contents=[prompt_content],
+                        config={'response_mime_type': 'application/json'}
+                    )
+                    batch_results = json.loads(response.text).get("results", [])
+                    while len(batch_results) < len(batch):
+                        batch_results.append("error processing text")
+                    
+                    processed_texts.extend(batch_results[:len(batch)])
+                    for original, transformed in zip(batch, batch_results):
+                        save_logs(f"Strategy: {strategy}\nOriginal: {original[:100]}...\nResult: {transformed}\n")
+                    
+                    time.sleep(20)
+                except Exception as e:
+                    
+                    # si erreur 429 on attend 60 secondes avant de réessayer
+                    if "429" or "503" in str(e):
+                        # 429 Too Many Requests or 503 Service Unavailable sont des erreurs de rate limit ou de surcharge du serveur
+                        print("Rate limit exceeded. Waiting for 60 seconds before retrying...")
+                        time.sleep(60)
+                        try:
+                            response = client.models.generate_content(
+                                model=model_id,
+                                contents=[prompt_content],
+                                config={'response_mime_type': 'application/json'}
+                            )
+                            batch_results = json.loads(response.text).get("results", [])
+                            while len(batch_results) < len(batch):
+                                batch_results.append("error processing text")
+                            
+                            processed_texts.extend(batch_results[:len(batch)])
+                            for original, transformed in zip(batch, batch_results):
+                                save_logs(f"Strategy: {strategy}\nOriginal: {original[:100]}...\nResult: {transformed}\n")
+                            
+                            time.sleep(2)
+                        except Exception as e:
+                            print(f"Error in batch {i}: {e}")
+                            processed_texts.extend([""] * len(batch))
+                    else:
+                        print(f"Error in batch {i}: {e}")
+                        processed_texts.extend([""] * len(batch))
+
+            for text_input in processed_texts:
                 inputs = processor(text=[text_input], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
                 with torch.no_grad():
-                    features = model.get_text_features(**inputs).pooler_output
+                    text_outputs = model.text_model(**inputs)
+                    pooled = text_outputs.pooler_output
+                    features = model.text_projection(pooled)
                     features /= features.norm(p=2, dim=-1, keepdim=True)
-                    descriptors.append(features) # (1, 512) (car on a un seul vecteur par paragraphe avec ces stratégies)
+                    descriptors.append(features)
 
-            elif strategy in ["sliding_window", "best_matching_chunk"]:
-                # avec ces stratégies, on obtient plusieurs vecteurs par paragraphe, donc on doit d'abord faire la projection puis éventuellement faire une agrégation (moyenne ou max) pour rester compatible avec le reste du code qui suppose qu'on a un seul vecteur par paragraphe.
+        elif strategy == "truncate":
+            for p in paragraphs:
+                inputs = processor(text=[p], return_tensors="pt", padding=True, truncation=True, max_length=77).to(device)
+                with torch.no_grad():
+                    text_outputs = model.text_model(**inputs)
+                    features = model.text_projection(text_outputs.pooler_output)
+                    features /= features.norm(p=2, dim=-1, keepdim=True)
+                    descriptors.append(features)
+
+        
+        elif strategy in ["sliding_window", "best_matching_chunk"]:
+            for p in paragraphs:
                 token_ids = processor.tokenizer(p, truncation=False, return_tensors="pt")['input_ids'][0]
-                chunk_size = 77
-                overlap = 10
+                chunk_size, overlap = 77, 10
                 chunks = [token_ids[i:i+chunk_size] for i in range(0, len(token_ids), chunk_size - overlap)]
                 
                 chunk_features = []
@@ -113,20 +185,17 @@ class InputDescriptor:
                         chunk = torch.cat([chunk, torch.zeros(chunk_size - len(chunk), dtype=torch.long)])
                     input_ids = chunk.unsqueeze(0).to(device)
                     with torch.no_grad():
-                        features = model.get_text_features(input_ids=input_ids).pooler_output
-                        features /= features.norm(p=2, dim=-1, keepdim=True)
-                        chunk_features.append(features) # (1, 512)
+                        text_outputs = model.text_model(input_ids=input_ids)
+                        feat = model.text_projection(text_outputs.pooler_output)
+                        feat /= feat.norm(p=2, dim=-1, keepdim=True)
+                        chunk_features.append(feat)
                 
-                combined_chunks = torch.cat(chunk_features, dim=0) # (nb_chunks, 512)
-
+                combined_chunks = torch.cat(chunk_features, dim=0)
                 if strategy == "sliding_window":
-                    # On fait la moyenne
                     mean_feat = combined_chunks.mean(dim=0, keepdim=True)
                     mean_feat /= mean_feat.norm(p=2, dim=-1, keepdim=True)
-                    descriptors.append(mean_feat) # (1, 512)
+                    descriptors.append(mean_feat)
                 else:
-                    # strategy == "best_matching_chunk"
-                    # On garde la matrice de tous les chunks et dans retrieval on prendra le chunk avec la meilleure similarité cosinus avec une image du dataset
                     descriptors.append(combined_chunks)
 
         self.paragraphsDescriptors = descriptors
